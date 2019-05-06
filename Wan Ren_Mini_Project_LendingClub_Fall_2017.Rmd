@@ -1,0 +1,718 @@
+---
+title: "Lending Club"
+author: "Wan Ren"
+date: 'Sunday, Nov 19th, 2017'
+output:
+  pdf_document:
+    toc: no
+    toc_depth: 2
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    toc: no
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{}
+- \fancyfoot[LE,RO]{\thepage}
+subtitle: STAT 471/571/701, Fall 2017
+graphics: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, fig.width=6,  fig.height=5, 
+                      fig.align='left', dev = 'pdf')
+if(!require('pacman')) {
+  install.packages('pacman')
+}
+pacman::p_load(car, ggplot2, glmnet,randomForest, tree, rpart, pROC, gbm, dplyr, tidyverse, bestglm, pROC, leaps, formattable, GGally, reshape2,plotly, car,data.table,caret)
+```
+
+*Goal*: recommend a classification rule to identify types of loans to be included in the portfolio
+
+```{r echo=FALSE}
+rm(list = ls())
+loan <- fread("loanStats_07_11_clean.csv", stringsAsFactors = T)  #data.table
+```
+
+#Introduction
+
+As the largest peer-to-peer online lending company in the U.S., Lending Club connects borrowers with investors. By cutting off the middle financial institutions in traditional lending process, Lending Club provides higher return for individual investors and lower interest rates for borrowers to get access to funding[1].
+
+Treasury bonds are always considered to be risk-free since they are backed by the U.S. government. However, the interest rate of 10-year T-bond decreased from 4.68% in 2007 to 1.97% in 2015, and many investors are trying to find better alternative choices for investment. Lending Club offers an attractive choice. As such, Lending Club’s business has grown exponentially in the loan market in recent years, so it’s more and more important for Lending Club to control risks by distinguishing good (not default, borrowers pay back loans monthly) and bad (default, borrowers do not pay back) loans[1]. 
+
+I present 3 models to recommend a classification rule that identifies the types of loans that will be included in the portfolio.
+
++ (1)	Logistics Regression with LASSO Regularization
++ (2)	Random Forest
++ (3)	Boosting
+
+The three models are compared in terms of interpretability and prediction accuracy. The best model was applied to recommend whether a loan will be included in the portfolio. 
+
+
+#Data Preparation
+
+The dataset used for this analysis is the cleaned loan status data from 2007 to 2011. Variables with large number of missingness are dropped from the data, which results in 2 percent of the original data exclude from the analysis. 
+
+Based on the cleaned dataset, categorical variables with many levels and little variability are excluded from the model building process. These variables are `zip_code`, `addr_state`, `emp_title`, `earliest_cr_line`.
+
+`grade` is dropped because `sub_grade` has the same but more detailed information. A log transformation is applied on the variable `annual_inc`.
+
+Additionally, post-loan variables are dropped because it is impossible to get the post-loan data before the investment.
+
+The final working dataset has 38971 observations with 21 variables. This dataset is divided randomly into 75% training data and 25% testing data. The training dataset is employed to train all of the three models, and the testing data is used to predict the accuracy of the models.
+
+##Included Variables
+
+The response variable is `loan_status`. There are 2 levels in this variable: (1) Charged off:  defaulted and there is no longer a reasonable expectation of further payments (e.g. bankruptcy), (2) Fully Paid.
+
+The predicting variables included could broadly be segmented into pre-funded loan data, borrower data and borrower credit data. 
+
+**a) Pre-funded loan data **
+a.`loan_amnt`: The listed amount of the loan applied for by the borrower
+b. `int_rate`: Interest Rate on the loan
+c. `sub_grade`: LC assigned loan subgrade based on FICO scores, credit history, "certain other credit attributes", loan term and loan amount.
+d. `installment`: The monthly payment owed by the borrower if the loan originates
+e. `purpose`: The monthly payment owed by the borrower if the loan originates.
+f. `term`: The number of payments on the loan. Values are in months and can be either 36 or 60.
+ 
+**b) Borrower basic information**
+a). `emp_length`: Employment length in years. 
+b). `home_ownership`: The home ownership status provided by the borrower during registration or obtained from the credit report. Our values are: RENT, OWN, MORTGAGE, OTHER.
+c). `annual_inc`: The self-reported annual income provided by the borrower during registration
+d). `verification_status`: Indicates if income was verified by LC.
+
+**c) Borrower credit data**
+a. `dti`: A ratio calculated using the borrower’s total monthly debt payments on the total debt obligations, excluding mortgage and the requested LC loan, divided by the borrower’s self-reported monthly income.
+b. `delinq_2yrs`: The number of 30+ days past-due incidences of delinquency in the borrower's credit file for the past 2 years
+c. `inq_last_6mths`: The number of inquiries in past 6 months (excluding auto and mortgage inquiries)
+d. `open_acc`: The number of open credit lines in the borrower's credit file.
+e. `pub_rec`: Number of derogatory public records
+f. `revol_bal`: Total credit revolving balance
+g. `revol_util`: Revolving line utilization rate, or the amount of credit the borrower is using relative to all available revolving credit.
+h. `total_acc`: The total number of credit lines currently in the borrower's credit file
+i. `pub_rec_bankruptcies`: Number of public record bankruptcies
+
+
+```{r echo=FALSE, results="hide"}
+loan$loan_status <- as.factor(recode(loan$loan_status,  "Charged Off"="0", "Fully Paid"="1"))
+loan$log_annual_inc <- log(loan$annual_inc)
+loan2 <- loan %>%
+      select(-annual_inc, -grade, -zip_code, -addr_state, -emp_title, -earliest_cr_line,  
+             #delete the vars, because they have too many levels
+             #"sub_grade" already has the info in grade
+              -issue_d, -funded_amnt, -funded_amnt_inv, -total_pymnt,-total_pymnt_inv,
+              -total_rec_prncp, -total_rec_int, -total_rec_late_fee, -recoveries,
+              -collection_recovery_fee, -last_pymnt_d, -last_credit_pull_d)
+```
+
+```{r echo=FALSE, results="hide"}
+set.seed(8)
+n <- nrow(loan2)
+n1 <- (3/4)*n  #75% training data
+train.index <- sample(n, n1,replace=FALSE)
+# length(train.index)
+data.train <-  loan2[train.index, ]
+data.test <- loan2[-train.index, ]
+```
+
+##Exploratory Data Analysis
+
+First, I examin the distribution of the response variable: `loan_status`. As shown in the histogram and table (in Appendix), the 86% of the loans are "Paid Off", which is assigned value "1" in this case.
+
+Next, I explore the correlations among the predictors by plotting a correlation heatmap of 14 numeric variables. In the following graph, it is clear that `installment` and `loan_amnt` have a very high correlation with each other.
+
+```{r, warning=FALSE, echo=F}
+loan2 %>%
+  select_if(is.numeric) %>%
+  qplot(x = Var1,
+        y = Var2,
+        data = melt(cor(
+          loan2 %>%
+          select_if(is.numeric))),
+        fill = value,
+        geom = "tile") +
+    xlab("") +
+    ylab("") +
+    guides(fill = guide_legend(title = "Correlation")) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Then, I examine the `sub_grade` categorical variable using a boxplot (in Appendix). We can see that people with worse grade tend to borrow larger amount of money.
+
+Finally, I look at the relationship between the predictors and the response variable.
+
++ As shown in a graph (in Appendix), it seems that people who borrow higher amount of money tend to have higher installment and higher number of "Charged Off". 
+
++ People who has a mortgage or rents a home are more likely to "Charged Off" than those who won their home, as shown in the graph (in Appendix).
+
+# LASSO logistic model to predict "loan_status"
+
+Logistic regression is a good starting point to build a model that is interpretable. It allows me to locate the variables that are more important in predicting whether a loan will be paid off or not.
+
+First, I used LASSO to select the basic variables and then use backward selection to identify the signifcant variables. 
+
+Then, I build a logistic regression model using the significant variables. A threshold of 0.667 is chosen because the estimated loss ratio of picking up a bad loan to that of missing a good loan is about 2 to 1 ("Charged Off"="0", "Fully Paid"="1"). The equation of the Bayes' rule with unequal losses is shown below:
+
+
+$$P(Y=1 \vert x) > \frac{\frac{a_{0,1}}{a_{1,0}}}{1 + \frac{a_{0,1}}{a_{1,0}}}$$
+
+$\frac{a_{0,1}}{a_{1,0}}=\frac{2}{1}=2$, then the Bayes rule is the one thresholds over the $prob(Y=1 \vert x) > \frac{2}{(1+2)}=0.667$
+
+Finally we get the weighted misclassification error by applying the model to the testing data.
+
+$$MCE=\frac{a_{1,0} \sum 1_{\hat y = 0 | y=1} + a_{0,1} \sum 1_{\hat y = 1 | y=0}}{n}$$
+
+
+The testing MCE error for logistic regression is 23.12%. The area under the curve (AUC) for this logistic regression model is 0.8545.
+
+```{r, echo=F, results="hide",warning=FALSE}
+set.seed(20) #set the random element in the folds, and tried to run the following codes several times, the results are stable.
+
+X1 <- model.matrix(loan_status ~., data = loan2)[, -1] # design the model matrix
+Y1 <- loan2$loan_status
+
+lasso.bi <- cv.glmnet(X1, Y1, alpha=1, family="binomial", nfolds = 10, type.measure = "deviance")  
+```
+
+```{r, results="hide",echo=F}
+lasso.bi$lambda.min
+lasso.bi$lambda.1se
+```
+
+```{r results="hide",echo=F}
+coef_1se.bi <- coef(lasso.bi, s = 'lambda.1se')
+nzcoef_1se.bi   <- rownames(coef_1se.bi)[which((coef_1se.bi) != 0)]
+# coef_min.bi <- coef(lasso.bi, s = 'lambda.min')
+# nzcoef_min.bi  <- rownames(coef_min.bi)[which((coef_min.bi) != 0)]
+# nzcoef_min.bi #nzcoef_min and nzcoef_1se have the different results
+```
+
+
+
+```{r results="hide",echo=F,warning=FALSE}
+formula <- paste(c('loan_status ~ term + sub_grade + emp_length + home_ownership + verification_status + purpose', nzcoef_1se.bi[c(-1,-3,-6,-7,-8,-9,-10,-11,-12,-13,-14,-15,-16,-17,-18,-19,-20,-21,-22,-23,-24,-25,-26,-27,-28,-29,-30,-31,-32,-33)]), collapse = ' + ') #replace the categorical var with the original var
+fit.lasso.1se.bi <- glm(formula, family=binomial, data=data.train)
+Anova(fit.lasso.1se.bi)
+```
+
+
+```{r results="hide", echo=F,warning=F}
+# Drop home_ownership
+fit.bi.1 <- update(fit.lasso.1se.bi, . ~ . -home_ownership)
+Anova(fit.bi.1)
+# Drop verification_status
+fit.bi.2 <- update(fit.bi.1, . ~ . -verification_status)
+Anova(fit.bi.2)
+# Drop pub_rec_bankruptcies
+fit.bi.3 <- update(fit.bi.2, . ~ . -pub_rec_bankruptcies)
+```
+
+```{r echo=F}
+predict.lasso <- predict(fit.bi.3, newdata=data.test, type="response")  #probabilities
+fit.lasso.pred <- as.factor(ifelse(predict.lasso > 0.667, "1", "0"))  # to assign \hat y
+```
+
+
+```{r echo=F}
+mse.lasso <- (sum(fit.lasso.pred[data.test$loan_status == "1"] != "1")
+           + sum(2*(fit.lasso.pred[data.test$loan_status == "0"] != "0")))/length(data.test$loan_status)
+```
+
+The final logistic regression model is as follows:
+
+```{r echo=F, warning=F}
+Anova(fit.bi.3)
+```
+
+```{r results="hide", echo=F}
+fit.bi.3.roc <- roc(data.test$loan_status, predict.lasso, plot=F)
+auc(fit.bi.3.roc)  
+```
+
+```{r, results="hide", echo=F}
+plot(1-fit.bi.3.roc$specificities, fit.bi.3.roc$sensitivities, col="red", pch=16, cex=.7, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+title("ROC for the LASSO logistic model")
+```
+
+
+#Random Forest model to predict "loan_status"
+
+The random forest is grown based on all possible 21 predictors, then I test the accuracy of the model using the testing data. The testing error of this Random Forest model is 13.93%, and its AUC is 0.8662. 
+
+```{r, echo=F}
+set.seed(8)
+fit.rf.train <- randomForest(loan_status ~., data.train) 
+```
+
+```{r, echo=F,results="hide"}
+predict.rf.y <- predict(fit.rf.train, newdata=data.test)   # labels
+predict.rf <- predict(fit.rf.train, newdata=data.test, type="prob")  #probabilities
+# fit.rf.pred <- as.factor(ifelse(predict.rf > 0.667, "1", "0"))  # to assign \hat y
+# mse.rf <- (sum(fit.rf.pred[data.test$loan_status == "1"] != "1")
+#            + sum(2*(fit.rf.pred[data.test$loan_status == "0"] != "0")))/length(data.test$loan_status)
+mse.rf <- mean(data.test$loan_status != predict.rf.y)
+mse.rf
+```
+
+```{r, results="hide", echo=F}
+fit2.roc <- roc(data.test$loan_status, predict.rf[,2], plot=F)
+auc(fit2.roc)  #0.8664
+```
+
+```{r, echo=F,results="hide"}
+plot(1-fit2.roc$specificities, fit2.roc$sensitivities, col="red", pch=16, cex=.7, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+title("ROC for the RF model")
+```
+
+
+### Compare two classifiers: Logistic Regression VS Random Forest
+
+I overlay the two ROC's of Logistic Regression and Random Forest to compare the two classifiers as below. The AUC for two models are very close, but Random Forest has slightly higher AUC than LASSO.
+
+```{r, echo=F}
+plot(1-fit.bi.3.roc$specificities, fit.bi.3.roc$sensitivities, col="red", pch=12, cex=.7, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+points(1-fit2.roc$specificities, fit2.roc$sensitivities, col="blue", pch=12, cex=.6)
+title("Blue line is for RF, and red for LASSO")
+```
+
+
+#Boosting model to predict "loan_status"
+
+Generalized boosting method (GBM) is also used to train this dataset, and then the trained boosting model is examined on the testing data. The testing error is 13.22%, and AUC is 0.8728.  
+
+
+```{r, echo=F, results="hide", warning=F}
+set.seed(6)
+objControl <- trainControl(method='cv', number=3, returnResamp='none', summaryFunction = twoClassSummary, classProbs = TRUE)
+outcomeName <- 'loan_status'
+predictorsNames <- names(loan2)[names(loan2) != outcomeName]
+formula.gbm <- paste(c(' ~ ', predictorsNames), collapse = ' + ') 
+mnn <- model.matrix(~  + loan_amnt + term + int_rate + installment + sub_grade + emp_length + home_ownership + verification_status + purpose + dti + delinq_2yrs + inq_last_6mths + open_acc + pub_rec + revol_bal + revol_util + total_acc + last_pymnt_amnt + pub_rec_bankruptcies + log_annual_inc, data = data.train)
+objModel <- train(make.names(data.train$loan_status), x=mnn,
+                  method='gbm',
+                  trControl=objControl,
+                  metric = "ROC",
+                  preProc = c("center", "scale"))
+```
+
+
+```{r, echo=F, results="hide", warning=F}
+mnn.test <- model.matrix(~  + loan_amnt + term + int_rate + installment + sub_grade + emp_length + home_ownership + verification_status + purpose + dti + delinq_2yrs + inq_last_6mths + open_acc + pub_rec + revol_bal + revol_util + total_acc + last_pymnt_amnt + pub_rec_bankruptcies + log_annual_inc, data = data.test)
+predict.gbm.lable <- predict(object=objModel, mnn.test)   # labels
+predict.gbm.y <- as.factor(ifelse(predict.gbm.lable=="X1",1,0)) # convert the labels back to 1 and 0
+predict.gbm <- predict(object=objModel, mnn.test, type='prob') 
+# predict.gbm.pred <- as.factor(ifelse(predict.gbm > 0.667, "1", "0"))  # to assign \hat y
+# mse.gbm <- (sum(predict.gbm.pred[data.test$loan_status == "1"] != "1")
+#            + sum(2*(predict.gbm.pred[data.test$loan_status == "0"] != "0")))/length(data.test$loan_status)
+mse.gbm <- mean(data.test$loan_status != predict.gbm.y)
+```
+
+
+```{r, echo=F,include=F, results="hide"}
+fit3.roc <- roc(data.test$loan_status, predict.gbm[,2], plot=F)
+auc(fit3.roc)  #0.8728
+```
+
+
+### Compare two classifiers: Random Forest VS GBM
+
+I overlay the two ROC's of Random Forest and GBM to compare the two classifiers as below. The AUC for two models are nearly indetical.
+
+```{r warning=FALSE, echo=FALSE}
+plot(1-fit3.roc$specificities, fit3.roc$sensitivities, col="red", pch=16, cex=.7, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+points(1-fit2.roc$specificities, fit2.roc$sensitivities, col="blue", pch=16, cex=.6)
+title("Blue line is for RF, and red for GBM")
+```
+
+
+## Final Comparison: Boosting VS Random Forest VS Logistic Regression
+
+Comparing the 3 models using their testing error (misclassifcation error), the testing error for Logistic Regression is the highest (0.2312), which follows by the second highest testing error (0.1392) from Random Forest. The boosting model with the lowest testing error (0.1322) trumps. 
+
+```{r, echo=F,results="hide"}
+print(c(mse.gbm, mse.rf, mse.lasso))
+```
+
+#Conclusion
+
+In conclusion, I intend to combine Logistic Regression model and Boosting model to recommend a classification rule to identify types of loans to be included in the portfolio for the reasons below. 
+
+(1) The Logistic Regression model provides me with the risk factors that a loan will be charged off as shown in the above analysis.
+
+(2) The boosting model is roboust after several trials and it gives me the best accuracy.
+
+#Limitations
+
+Given the restricted timeline and computing power of my PC, some of the important factors that might have very good predictive power are thrown away.
+
+Additionally, the two models are not tested for real prediction. Further testing is desired. 
+
+#Further Explore Lending Club’s Business Model
+
+Beyond the dataset, I am interested in exploring why the lending club can grow its business rapidly. 
+
+(1) The simple and quick process of lending and borrowing makes Lending Club attractive for those who want to borrow or to lend. The average rating of Lending Club is 4.83 out of, 5 according to 29,481 reviews [3]. The customers regard Lending Club as "Fast and Easy", "Better than the Bank". 
+
+(2) Lending Club generally recommends the loans with higher-qualities, which also the reason why it is a successful business. As in the above analysis, 86% of the loans in Lending Club are "Paid Off", indicating its borrowers tend to have good credits. 
+
+(3) What's more, Lending Club has established a good return-rate for its lenders. As of June 30, 2015, the average Lending Club borrower has a FICO score of 699, 17.7% debt-to-income ratio (excluding mortgage), 16.2 years of credit history, \$73,945 of personal income and takes out an average loan of \$14,553 that s/he uses for debt consolidation or for paying off credit card debts. The investors had funded \$11,217,348,156 in loans, with \$1,911,759,192 coming from Q2 2015. The nominal average interest rate is 14.08%, default rate 3.39%, and an average net annualized return (net of defaults and service fees) of 8.93%. The average returns of investment for Lending Club lenders are between 5.47% and 10.22%, with 23 straight quarters of positive returns as of the second quarter of 2013[2].
+
+In sum, the differentiating points of Lending Club's business model are its simplicity, responsiveness, high-quality loan and profitability. 
+
+#References
+
+[1] Quoted directly from the mini-project question
+
+[2] Wikipedia page [https://en.wikipedia.org/wiki/Lending_Club]
+
+[3] Lending Club reviews [https://www.lendingclub.com/company/lendingclub-reviews]
+
+
+#Appendix
+
+###Graphs
+
+```{r warning=FALSE, echo=F}
+ggplot(data = loan2, aes(loan_status)) +
+  geom_histogram(stat="count", binwidth=2) +
+  labs(title=" Figure 1: Histogram of `loan_status` distribution", x = "Loan Status", y = "Count") + 
+  theme_bw()
+```
+
+```{r eval=F}
+loan2 %>%
+  dplyr::group_by(loan_status) %>%
+  dplyr::summarise(n.status = n(),
+            precent.status = n.status/nrow(loan2))
+```
+
+```{r , echo=F}
+loan %>%
+    ggplot(aes(x = sub_grade, y= loan_amnt)) + geom_boxplot() +
+    xlab("grade") + ylab("loan_amnt") 
+```
+
+```{r, echo=F}
+loan2 %>%
+  ggplot(aes(x = log(loan_amnt), y = log(installment), color = loan_status)) + 
+  geom_point() 
+```
+
+```{r warning=FALSE, echo=F}
+loan2 %>%
+  ggplot(aes(x = log_annual_inc, y = log(installment), color = loan_status)) + 
+  geom_point()  +
+  facet_wrap(~home_ownership)
+```
+
+###R codes
+
+```{r eval=F, echo=FALSE}
+rm(list = ls())
+loan <- fread("loanStats_07_11_clean.csv", stringsAsFactors = T)  #data.table
+```
+
+Recode the response variable
+```{r eval=F}
+names(loan)
+loan$loan_status <- as.factor(recode(loan$loan_status,  "Charged Off"="0", "Fully Paid"="1"))
+```
+
+Take out the post-loan variables and redundant variables
+```{r eval=F}
+loan$log_annual_inc <- log(loan$annual_inc)
+loan2 <- loan %>%
+  select(-annual_inc, -grade, -zip_code, -addr_state, -emp_title, -earliest_cr_line,  
+         #delete the vars, because they have too many levels
+         #"sub_grade" already has the info in grade
+         -issue_d, -funded_amnt, -funded_amnt_inv, -total_pymnt,-total_pymnt_inv,
+         -total_rec_prncp, -total_rec_int, -total_rec_late_fee, -recoveries,
+         -collection_recovery_fee, -last_pymnt_d, -last_credit_pull_d)
+dim(loan) # 39 vars
+dim(loan2) #38971 obs, 21 vars
+names(loan2)
+```
+
+Divide the data into training and testing sets (75% training).
+```{r eval=F}
+set.seed(8)
+n <- nrow(loan2)
+n1 <- (3/4)*n  #75% training data
+train.index <- sample(n, n1,replace=FALSE)
+# length(train.index)
+data.train <-  loan2[train.index, ]
+data.test <- loan2[-train.index, ]
+```
+
+####EDA
+######Response variable
+Histogram of `loan_status` distribution.
+```{r eval=F}
+ggplot(data = loan2, aes(loan_status)) +
+  geom_histogram(stat="count", binwidth=2) +
+  labs( x = "Loan Status", y = "Count") + 
+  theme_bw()
+```
+
+86% of the loans are paid off.
+
+```{r eval=F}
+loan2 %>%
+  dplyr::group_by(loan_status) %>%
+  dplyr::summarise(n.status = n(),
+                   precent.status = n.status/nrow(loan2))
+```
+
+
+```{r eval=F}
+str(loan2)
+```
+
+
+#### Predictors
+
+#####Explore the correlations among the numeric variables.
+*Correlation heatmap*
+  
+  ```{r eval=F}
+loan2 %>%
+  select_if(is.numeric) %>%
+  qplot(x = Var1,
+        y = Var2,
+        data = melt(cor(
+          loan2 %>%
+            select_if(is.numeric))),
+        fill = value,
+        geom = "tile") +
+  xlab("") +
+  ylab("") +
+  guides(fill = guide_legend(title = "Correlation")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+As for LC assigned loan grade, people with worse grade tend to borrow larger amount of money.
+```{r eval=F}
+loan %>%
+  ggplot(aes(x = sub_grade, y= loan_amnt)) + geom_boxplot() +
+  xlab("grade") + ylab("loan_amnt") 
+```
+
+
+```{r eval=F}
+loan2 %>%
+  ggplot(aes(x = log(loan_amnt), y = log(installment), color = loan_status)) + 
+  geom_point() 
+```
+
+```{r eval=F}
+loan2 %>%
+  ggplot(aes(x = log_annual_inc, y = log(installment), color = loan_status)) + 
+  geom_point()  +
+  facet_wrap(~home_ownership)
+```
+
+#### LASSO logistic model to predict "loan_status"
+
+```{r eval=F, warning=F,results="hide"}
+set.seed(20) #set the random element in the folds, and tried to run the following codes several times, the results are stable.
+
+X1 <- model.matrix(loan_status ~., data = loan2)[, -1] # design the model matrix
+Y1 <- loan2$loan_status
+
+lasso.bi <- cv.glmnet(X1, Y1, alpha=1, family="binomial", nfolds = 10, type.measure = "deviance")  
+
+plot(lasso.bi)
+```
+
+```{r eval=F,results="hide"}
+lasso.bi$lambda.min
+lasso.bi$lambda.1se
+```
+
+The models suggested using lambds.1se and lambda.min are very differet. I further explore and compare the two models in the following part.
+
+```{r eval=F,results="hide"}
+coef_1se.bi <- coef(lasso.bi, s = 'lambda.1se')
+nzcoef_1se.bi   <- rownames(coef_1se.bi)[which((coef_1se.bi) != 0)]
+nzcoef_1se.bi
+# coef_min.bi <- coef(lasso.bi, s = 'lambda.min')
+# nzcoef_min.bi  <- rownames(coef_min.bi)[which((coef_min.bi) != 0)]
+# nzcoef_min.bi #nzcoef_min and nzcoef_1se have the different results
+```
+
+
+
+```{r eval=F,results="hide"}
+formula <- paste(c('loan_status ~ term + sub_grade + emp_length + home_ownership + verification_status + purpose', nzcoef_1se.bi[c(-1,-3,-6,-7,-8,-9,-10,-11,-12,-13,-14,-15,-16,-17,-18,-19,-20,-21,-22,-23,-24,-25,-26,-27,-28,-29,-30,-31,-32,-33)]), collapse = ' + ') #replace the categorical var with the original var
+fit.lasso.1se.bi <- glm(formula, family=binomial, data=data.train)
+Anova(fit.lasso.1se.bi)
+```
+
+####Build a logistic regression model using backward selection based on the lasso output
+
+```{r eval=F,results="hide"}
+# Drop home_ownership
+fit.bi.1 <- update(fit.lasso.1se.bi, . ~ . -home_ownership)
+Anova(fit.bi.1)
+# Drop verification_status
+fit.bi.2 <- update(fit.bi.1, . ~ . -verification_status)
+Anova(fit.bi.2)
+# Drop pub_rec_bankruptcies
+fit.bi.3 <- update(fit.bi.2, . ~ . -pub_rec_bankruptcies)
+Anova(fit.bi.3)
+```
+
+
+#### Classification rules
+
+####Bayes rule with unequal losses
+```{r eval=F,results="hide"}
+predict.lasso <- predict(fit.bi.3, newdata=data.test, type="response")  #probabilities
+fit.lasso.pred <- as.factor(ifelse(predict.lasso > 0.667, "1", "0"))  # to assign \hat y
+```
+
+Finally we get the weighted misclassification error (may not be a number between 0 and 1)
+
+$$MCE=\frac{a_{1,0} \sum 1_{\hat y = 0 | y=1} + a_{0,1} \sum 1_{\hat y = 1 | y=0}}{n}$$
+
+*Testing errors*
+
+The testing MCE error for lasso is 13.62%.
+
+```{r eval=F,results="hide"}
+mse.lasso <- (sum(fit.lasso.pred[data.test$loan_status == "1"] != "1")
++ sum(2*(fit.lasso.pred[data.test$loan_status == "0"] != "0")))/length(data.test$loan_status)
+mse.lasso
+```
+
+
+####ROC curve for the testing data
+
+```{r eval=F,results="hide" }
+fit.bi.3.roc <- roc(data.test$loan_status, predict.lasso, plot=TRUE)
+auc(fit.bi.3.roc)  #0.8545
+```
+
+```{r eval=F }
+plot(1-fit.bi.3.roc$specificities, fit.bi.3.roc$sensitivities, col="red", pch=16, cex=.7, 
+xlab="False Positive", 
+ylab="Sensitivity")
+title("ROC for the LASSO logistic model")
+```
+
+
+####Random Forest model to predict "loan_status"
+
+```{r eval=F}
+set.seed(8)
+fit.rf.train <- randomForest(loan_status ~., data.train) 
+plot(fit.rf.train)
+```
+
+*Testing errors*
+The testing MCE error for RF is %.
+```{r eval=F}
+predict.rf.y <- predict(fit.rf.train, newdata=data.test)   # labels
+predict.rf <- predict(fit.rf.train, newdata=data.test, type="prob")  #probabilities
+mse.rf <- mean(data.test$loan_status != predict.rf.y)
+mse.rf
+```
+
+
+*Testing ROC curve*
+
+```{r eval=F,results="hide"}
+fit2.roc <- roc(data.test$loan_status, predict.rf[,2], plot=TRUE)
+auc(fit2.roc)  #0.8664
+```
+
+```{r eval=F}
+plot(1-fit2.roc$specificities, fit2.roc$sensitivities, col="red", pch=16, cex=.7, 
+xlab="False Positive", 
+ylab="Sensitivity")
+title("ROC for the RF model")
+```
+
+
+##### Compare two classifiers: LASSO VS Random Forest
+
+We could use `ROC` together with `AUC` to compare the two classifiers based on fit1 and fit2. We overlay the two ROC's
+```{r eval=F}
+plot(1-fit.bi.3.roc$specificities, fit.bi.3.roc$sensitivities, col="red", pch=16, cex=.7, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+points(1-fit2.roc$specificities, fit2.roc$sensitivities, col="blue", pch=16, cex=.6)
+title("Blue line is for RF, and red for LASSO")
+```
+
+The AUC for two models are very close, but Random Forest has slightly higher AUC than LASSO.
+
+
+####Boosting (GBM) model to predict "loan_status"
+
+library `caret`
+
+Sample codes are from [https://amunategui.github.io/binary-outcome-modeling/]
+
+`caret` offers many tuning functions to help you get as much as possible out of your models; the trainControl function allows you to control the resampling of your data. This will split the training data set internally and do it’s own train/test runs to figure out the best settings for your model. In this case, we’re going to cross-validate the data 3 times, therefore training it 3 times on different portions of the data before settling on the best tuning parameters (for gbm it is trees, shrinkage, and interaction depth). You can also set these values yourself if you don’t trust the function.
+
+```{r eval=F}
+objControl <- trainControl(method='cv', number=3, returnResamp='none', summaryFunction = twoClassSummary, classProbs = TRUE)
+outcomeName <- 'loan_status'
+predictorsNames <- names(loan2)[names(loan2) != outcomeName]
+formula.gbm <- paste(c(' ~ ', predictorsNames), collapse = ' + ') 
+mnn <- model.matrix(~  + loan_amnt + term + int_rate + installment + sub_grade + emp_length + home_ownership + verification_status + purpose + dti + delinq_2yrs + inq_last_6mths + open_acc + pub_rec + revol_bal + revol_util + total_acc + last_pymnt_amnt + pub_rec_bankruptcies + log_annual_inc, data = data.train)
+objModel <- train(make.names(data.train$loan_status), x=mnn,
+                  method='gbm',
+                  trControl=objControl,
+                  metric = "ROC",
+                  preProc = c("center", "scale"))
+```
+
+```{r eval=F}
+summary(objModel)
+```
+
+*Testing errors*
+
+```{r eval=F}
+mnn.test <- model.matrix(~  + loan_amnt + term + int_rate + installment + sub_grade + emp_length + home_ownership + verification_status + purpose + dti + delinq_2yrs + inq_last_6mths + open_acc + pub_rec + revol_bal + revol_util + total_acc + last_pymnt_amnt + pub_rec_bankruptcies + log_annual_inc, data = data.test)
+predict.gbm.lable <- predict(object=objModel, mnn.test)   # labels
+predict.gbm.y <- as.factor(ifelse(predict.gbm.lable=="X1",1,0)) # convert the labels back to 1 and 0
+predict.gbm <- predict(object=objModel, mnn.test, type='prob') 
+mse.gbm <- mean(data.test$loan_status != predict.gbm.y)
+mse.gbm
+```
+
+```{r eval=F}
+fit3.roc <- roc(data.test$loan_status, predict.gbm[,2], plot=TRUE)
+auc(fit3.roc)  #0.8711
+```
+
+```{r eval=F}
+plot(1-fit3.roc$specificities, fit3.roc$sensitivities, col="red", pch=16, cex=.7, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+points(1-fit2.roc$specificities, fit2.roc$sensitivities, col="blue", pch=16, cex=.6)
+title("Blue line is for RF, and red for GBM")
+```
+
+
+##### Comparison: boosting VS RF 
+
+```{r eval=F}
+print(c(mse.gbm, mse.rf, mse.lasso))
+```
+
+
+
+
